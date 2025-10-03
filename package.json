@@ -3,21 +3,54 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start"
+    "dev": "next dev -H 0.0.0.0",
+    "build": "next build",
+    "start": "next start",
+    "server": "node start-server.js",
+    "server:dev": "nodemon start-server.js",
+    "server:prod": "NODE_ENV=production node start-server.js",
+    "test:simple": "node test-simple.js",
+    "test:integration": "node server/test-integration.js",
+    "test:example": "node server/examples/ChatClient.js",
+    "crypto:demo": "node -e \"const service = require('./server/crypto/CredentialCryptoService'); new service().demonstrateUsage().catch(console.error)\"",
+    "didcomm:demo": "node -e \"const service = require('./server/didcomm/DIDCommService'); const s = new service(); s.initialize().then(() => s.demonstrateUsage()).catch(console.error)\""
   },
   "dependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.18.1",
+    "@veramo/core": "^6.0.0",
+    "@veramo/credential-w3c": "^6.0.0",
+    "@veramo/data-store": "^6.0.0",
+    "@veramo/did-comm": "^6.0.0",
+    "@veramo/did-manager": "^6.0.0",
+    "@veramo/did-provider-key": "^6.0.0",
+    "@veramo/did-resolver": "^6.0.0",
+    "@veramo/key-manager": "^6.0.0",
+    "@veramo/kms-local": "^6.0.0",
+    "@veramo/message-handler": "^6.0.0",
+    "@zxing/library": "^0.21.3",
+    "crypto-js": "^4.2.0",
+    "dexie": "^4.2.0",
+    "did-resolver": "^4.1.0",
+    "key-did-resolver": "^4.0.0",
+    "lucide-react": "^0.544.0",
+    "next": "15.5.4",
+    "qr-scanner": "^1.4.2",
+    "qrcode": "^1.5.4",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "next": "15.5.4"
+    "sql.js": "^1.13.0",
+    "typeorm": "^0.3.27",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
-    "typescript": "^5",
+    "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@tailwindcss/postcss": "^4",
-    "tailwindcss": "^4"
+    "@types/sql.js": "^1.4.9",
+    "tailwindcss": "^4",
+    "typescript": "^5"
   }
 }
