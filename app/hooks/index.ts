@@ -31,7 +31,7 @@ export const useChats = () => {
     }
   }, []);
 
-  const selectChat = useCallback((chatId: string) => {
+  const selectChat = useCallback((chatId: string | null) => {
     setSelectedChatId(chatId);
   }, []);
 

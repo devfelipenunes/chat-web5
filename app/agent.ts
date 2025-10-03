@@ -9,6 +9,103 @@ import { getResolver as getKeyResolver } from 'key-did-resolver';
 import { KeyDIDProvider } from '@veramo/did-provider-key';
 import CryptoJS from 'crypto-js';
 
+interface ChatCredential {
+  type: string;
+  jwt: string;
+  chatId: string;
+  ownerDid: string;
+  createdAt: string;
+  hash: string;
+  savedAt: string;
+}
+
+class PersistentCredentialStore {
+  private readonly storageKey = 'veramo-credentials';
+
+  private getStoredCredentials(): Map<string, any> {
+    try {
+      const stored = localStorage.getItem(this.storageKey);
+      if (stored) {
+        const data = JSON.parse(stored);
+        return new Map(Object.entries(data));
+      }
+    } catch (error) {
+      console.error('❌ Erro ao carregar credenciais do localStorage:', error);
+    }
+    return new Map();
+  }
+
+  private saveCredentials(credentials: Map<string, any>): void {
+    try {
+      const data = Object.fromEntries(credentials);
+      localStorage.setItem(this.storageKey, JSON.stringify(data));
+    } catch (error) {
+      console.error('❌ Erro ao salvar credenciais no localStorage:', error);
+    }
+  }
+
+  async saveCredential(credential: any): Promise<string> {
+    const hash = this.generateHash(credential);
+    const credentials = this.getStoredCredentials();
+    
+    credentials.set(hash, {
+      ...credential,
+      hash,
+      savedAt: new Date().toISOString()
+    });
+    
+    this.saveCredentials(credentials);
+    console.log('💾 Credencial salva:', hash);
+    return hash;
+  }
+
+  async getCredential(hash: string): Promise<any | null> {
+    const credentials = this.getStoredCredentials();
+    return credentials.get(hash) || null;
+  }
+
+  async getAllCredentials(): Promise<any[]> {
+    const credentials = this.getStoredCredentials();
+    return Array.from(credentials.values());
+  }
+
+  async getCredentialsByIssuer(issuerDid: string): Promise<any[]> {
+    const credentials = this.getStoredCredentials();
+    return Array.from(credentials.values()).filter(
+      (cred: any) => cred.issuer?.id === issuerDid || cred.issuer === issuerDid
+    );
+  }
+
+  async getCredentialsBySubject(subjectDid: string): Promise<any[]> {
+    const credentials = this.getStoredCredentials();
+    return Array.from(credentials.values()).filter(
+      (cred: any) => cred.credentialSubject?.id === subjectDid
+    );
+  }
+
+  async deleteCredential(hash: string): Promise<boolean> {
+    const credentials = this.getStoredCredentials();
+    const deleted = credentials.delete(hash);
+    if (deleted) {
+      this.saveCredentials(credentials);
+      console.log('🗑️ Credencial removida:', hash);
+    }
+    return deleted;
+  }
+
+  async clearAllCredentials(): Promise<void> {
+    localStorage.removeItem(this.storageKey);
+    console.log('🧹 Todas as credenciais removidas');
+  }
+
+  private generateHash(credential: any): string {
+    const content = JSON.stringify(credential);
+    return CryptoJS.SHA256(content).toString();
+  }
+}
+
+const persistentCredentialStore = new PersistentCredentialStore();
+
 export const agentPromise = createAgent({
   plugins: [
     new KeyManager({
@@ -172,6 +269,63 @@ export async function createAgentWithCrypto() {
   (agent as any).unpackDIDCommMessage = crypto.unpackDIDCommMessage.bind(crypto);
   (agent as any).encryptMessage = crypto.encryptMessage.bind(crypto);
   (agent as any).decryptMessage = crypto.decryptMessage.bind(crypto);
+
+  (agent as any).saveCredential = async (credential: any): Promise<string> => {
+    return await persistentCredentialStore.saveCredential(credential);
+  };
+
+  (agent as any).getCredential = async (hash: string): Promise<any | null> => {
+    return await persistentCredentialStore.getCredential(hash);
+  };
+
+  (agent as any).getAllCredentials = async (): Promise<any[]> => {
+    return await persistentCredentialStore.getAllCredentials();
+  };
+
+  (agent as any).getCredentialsByIssuer = async (issuerDid: string): Promise<any[]> => {
+    return await persistentCredentialStore.getCredentialsByIssuer(issuerDid);
+  };
+
+  (agent as any).getCredentialsBySubject = async (subjectDid: string): Promise<any[]> => {
+    return await persistentCredentialStore.getCredentialsBySubject(subjectDid);
+  };
+
+  (agent as any).deleteCredential = async (hash: string): Promise<boolean> => {
+    return await persistentCredentialStore.deleteCredential(hash);
+  };
+
+  (agent as any).saveChatCredential = async (jwt: string, chatId: string, ownerDid: string): Promise<string> => {
+    const credential = {
+      type: 'ChatAccessCredential',
+      jwt,
+      chatId,
+      ownerDid,
+      createdAt: new Date().toISOString(),
+    };
+    
+    console.log('💾 Salvando credencial de chat:', { chatId, ownerDid });
+    return await persistentCredentialStore.saveCredential(credential);
+  };
+
+  (agent as any).getChatCredentials = async (): Promise<ChatCredential[]> => {
+    const allCredentials = await persistentCredentialStore.getAllCredentials();
+    return allCredentials.filter((cred: any) => cred.type === 'ChatAccessCredential');
+  };
+
+  (agent as any).getCredential = async (credentialId: string): Promise<ChatCredential | null> => {
+    const allCredentials = await persistentCredentialStore.getAllCredentials();
+    return allCredentials.find((cred: any) => cred.id === credentialId) || null;
+  };
+
+  (agent as any).deleteCredential = async (credentialId: string): Promise<void> => {
+    await persistentCredentialStore.deleteCredential(credentialId);
+  };
+
+  (agent as any).clearAllCredentials = async (): Promise<void> => {
+    await persistentCredentialStore.clearAllCredentials();
+  };
   
   return agent;
 }
+
+export type { ChatCredential };

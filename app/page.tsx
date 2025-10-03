@@ -25,6 +25,38 @@ import { Chat } from "./types";
 import { Message } from "./types/message";
 import { db, ChatMessage, ChatRoom } from "./db";
 
+function parseJWT(token: string) {
+  try {
+    console.log('🔍 Decodificando JWT...', { token, type: typeof token });
+    
+    if (!token || typeof token !== 'string') {
+      throw new Error(`Token inválido: esperado string, recebido ${typeof token}`);
+    }
+    
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      throw new Error('JWT inválido: deve ter 3 partes separadas por ponto');
+    }
+    
+    const base64Url = parts[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    
+    const padding = base64.length % 4;
+    const paddedBase64 = padding ? base64 + '='.repeat(4 - padding) : base64;
+    
+    const jsonPayload = atob(paddedBase64);
+    const decoded = JSON.parse(jsonPayload);
+    
+    console.log('✅ JWT decodificado com sucesso:', decoded);
+    return decoded;
+    
+  } catch (error) {
+    console.error('❌ Erro ao decodificar JWT:', error);
+    console.error('❌ Token recebido:', token);
+    return null;
+  }
+}
+
 const App = () => {
   const [view, setView] = useState<"loading" | "ready" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState("");
@@ -153,6 +185,16 @@ const App = () => {
 
     initializeAgent();
   }, []);
+
+  useEffect(() => {
+    if (agent) {
+      (window as any).debugCredentials = debugCredentials;
+      (window as any).clearCredentials = async () => {
+        await agent.clearAllCredentials();
+        console.log('🧹 Credenciais limpas via console');
+      };
+    }
+  }, [agent]);
 
   useEffect(() => {
     const handleWebSocketMessage = async (event: any) => {
@@ -291,35 +333,145 @@ const App = () => {
     }
   };
 
+  // Função para sincronizar chats com credenciais do Veramo
+  const syncChatsWithCredentials = async () => {
+    if (!agent || !currentUserDid) return;
+    
+    console.log('🔄 Sincronizando chats com credenciais...');
+    
+    try {
+      const credentials = await agent.getChatCredentials();
+      console.log('📋 Credenciais encontradas:', credentials.length);
+
+      const existingChats = await db.chatRooms.toArray();
+      const chatIds = new Set(existingChats.map(chat => chat.chatId));
+
+      for (const cred of credentials) {
+        try {
+          const jwtData = parseJWT(cred.jwt);
+          if (!jwtData?.vc?.credentialSubject) {
+            console.warn('⚠️ Credencial com dados inválidos:', cred.id);
+            continue;
+          }
+
+          const subject = jwtData.vc.credentialSubject;
+          const credentialTypes = jwtData.vc.type || [];
+
+          // Processar credencial de chat
+          if (credentialTypes.includes('ChatCredential')) {
+            const chatDid = subject.chatDid;
+            const chatName = subject.chatName || 'Chat sem nome';
+            const owner = subject.owner;
+            const websocketUrl = subject.websocketUrl || 'ws://192.168.15.3:8080';
+            const isOwner = owner === currentUserDid;
+
+            if (!chatIds.has(chatDid)) {
+              console.log(`➕ Adicionando chat do proprietário: ${chatName} (${chatDid})`);
+              
+              await db.chatRooms.add({
+                chatId: chatDid,
+                name: chatName,
+                ownerDid: owner,
+                createdAt: subject.createdAt || new Date().toISOString(),
+                isOwner: isOwner,
+                saveMessagesLocally: true,
+                webhookEnabled: false,
+                websocketUrl: websocketUrl,
+                isActive: subject.status === 'active'
+              });
+              
+              chatIds.add(chatDid);
+            }
+          }
+          
+          // Processar credencial de convite
+          else if (credentialTypes.includes('ChatInviteCredential')) {
+            const chatDid = subject.chatDid;
+            const chatCredentialId = subject.chatCredentialId;
+            
+            if (!chatIds.has(chatDid)) {
+              // Buscar a credencial do chat referenciada
+              const chatCredential = await agent.getCredential(chatCredentialId);
+              
+              if (chatCredential) {
+                const chatData = parseJWT(chatCredential.jwt);
+                if (chatData?.vc?.credentialSubject) {
+                  const chatInfo = chatData.vc.credentialSubject;
+                  const chatName = chatInfo.chatName || 'Chat sem nome';
+                  const owner = chatInfo.owner;
+                  const websocketUrl = chatInfo.websocketUrl || 'ws://192.168.15.3:8080';
+                  
+                  console.log(`➕ Adicionando chat via convite: ${chatName} (${chatDid})`);
+                  
+                  await db.chatRooms.add({
+                    chatId: chatDid,
+                    name: chatName,
+                    ownerDid: owner,
+                    createdAt: chatInfo.createdAt || new Date().toISOString(),
+                    isOwner: false,
+                    saveMessagesLocally: true,
+                    webhookEnabled: false,
+                    websocketUrl: websocketUrl,
+                    isActive: chatInfo.status === 'active'
+                  });
+                  
+                  chatIds.add(chatDid);
+                }
+              } else {
+                console.warn(`⚠️ Credencial de chat referenciada não encontrada: ${chatCredentialId}`);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('❌ Erro ao processar credencial:', error);
+        }
+      }
+
+      console.log('✅ Sincronização concluída');
+    } catch (error) {
+      console.error('❌ Erro na sincronização:', error);
+    }
+  };
+
+  useEffect(() => {
+    if (agent && currentUserDid) {
+      syncChatsWithCredentials();
+    }
+  }, [agent, currentUserDid]);
+
   const handleCreateChat = async () => {
     if (!currentUserDid || !agent || isCreatingChat) return;
     
     setIsCreatingChat(true);
     try {
-      const chatId = `chat:${currentUserDid}:${Date.now()}`;
+      // Gerar DID único para o chat
+      const chatDid = `did:chat:${currentUserDid.split(':')[2]}:${Date.now()}`;
       const chatName = `Chat ${new Date().toLocaleString()}`;
 
-      const vcJwt = await agent.createVerifiableCredential({
+      // 1. Criar credencial do chat (ownership)
+      const chatCredential = await agent.createVerifiableCredential({
         credential: {
           '@context': ['https://www.w3.org/2018/credentials/v1'],
-          type: ['VerifiableCredential', 'ChatOwnershipCredential'],
+          type: ['VerifiableCredential', 'ChatCredential'],
           issuer: { id: currentUserDid },
           issuanceDate: new Date().toISOString(),
           credentialSubject: {
-            id: currentUserDid,
-            chatId: chatId,
-            role: 'owner',
+            id: chatDid,
             chatName: chatName,
-            permissions: ['read', 'write', 'invite', 'manage']
+            owner: currentUserDid,
+            createdAt: new Date().toISOString(),
+            websocketUrl: 'ws://192.168.15.3:8080',
+            status: 'active'
           }
         },
         proofFormat: 'jwt'
       });
 
-      console.log('✅ Chat criado com VC:', vcJwt);
+      console.log('✅ Credencial do chat criada:', chatCredential);
 
+      // Salvar no banco local
       await db.chatRooms.add({
-        chatId: chatId,
+        chatId: chatDid,
         name: chatName,
         ownerDid: currentUserDid,
         createdAt: new Date().toISOString(),
@@ -330,15 +482,15 @@ const App = () => {
         isActive: true
       });
 
-      await db.credentials.add({
-        chatId: chatId,
-        issuerDid: currentUserDid,
-        jwt: vcJwt.proof.jwt,
-        receivedAt: new Date().toISOString()
-      });
+      // Salvar credencial do chat no Veramo
+      await agent.saveChatCredential(
+        chatCredential.proof.jwt,
+        chatDid,
+        currentUserDid
+      );
 
       const newChat: Chat = {
-        id: chatId,
+        id: chatDid,
         name: chatName,
         host: currentUserDid,
         isOwner: true,
@@ -347,11 +499,70 @@ const App = () => {
       };
       
       addChat(newChat);
-      selectChat(chatId);
+      selectChat(chatDid);
     } catch (error) {
       console.error('Erro ao criar chat:', error);
     } finally {
       setIsCreatingChat(false);
+    }
+  };
+
+  const handleDeleteChat = async (chatId: string) => {
+    if (!agent || !chatId) return;
+    
+    try {
+      console.log('🗑️ Deletando chat:', chatId);
+      
+      // Confirmar com o usuário
+      const confirmed = window.confirm('Tem certeza que deseja apagar este chat? Todas as mensagens e credenciais associadas serão removidas permanentemente.');
+      
+      if (!confirmed) return;
+      
+      // 1. Remover credenciais do Veramo
+      const credentials = await agent.getChatCredentials();
+      for (const cred of credentials) {
+        try {
+          const jwtData = parseJWT(cred.jwt);
+          if (jwtData?.vc?.credentialSubject) {
+            const subject = jwtData.vc.credentialSubject;
+            
+            // Verificar se é credencial relacionada ao chat
+            if (subject.chatDid === chatId || subject.chatId === chatId) {
+              console.log('🗑️ Removendo credencial:', cred.id);
+              await agent.deleteCredential(cred.id);
+            }
+          }
+        } catch (error) {
+          console.error('Erro ao processar credencial para deletar:', error);
+        }
+      }
+      
+      // 2. Remover mensagens do banco local
+      await db.messages.where('chatId').equals(chatId).delete();
+      console.log('🗑️ Mensagens removidas do chat:', chatId);
+      
+      // 3. Remover webhook configs se existirem
+      await db.webhookConfigs.where('chatId').equals(chatId).delete();
+      console.log('🗑️ Configs de webhook removidas do chat:', chatId);
+      
+      // 4. Remover o chat do banco local
+      await db.chatRooms.where('chatId').equals(chatId).delete();
+      console.log('🗑️ Chat removido do banco:', chatId);
+      
+      // 5. Atualizar estado
+      if (selectedChatId === chatId) {
+        selectChat(null);
+      }
+      
+      // 6. Recarregar lista de chats
+      await loadChats();
+      
+      console.log('✅ Chat deletado com sucesso:', chatId);
+      alert('Chat deletado com sucesso!');
+      
+    } catch (error: any) {
+      console.error('❌ Erro ao deletar chat:', error);
+      alert('Erro ao deletar chat: ' + error.message);
     }
   };
 
@@ -384,13 +595,13 @@ const App = () => {
   const handleProcessInvite = async () => {
     if (!inviteCode.trim() || !currentUserDid || !agent || isProcessingInvite) return;
     
-    console.log('🎫 Processando convite P2P...');
+    console.log('🎫 Processando convite com nova estrutura...');
     setIsProcessingInvite(true);
     
     try {
       const jwtToken = inviteCode.trim();
       
-      console.log('🔍 Verificando VC...');
+      console.log('🔍 Verificando credencial de convite...');
       
       const result = await agent.verifyCredential({
         credential: jwtToken
@@ -402,71 +613,73 @@ const App = () => {
         const credential = result.verifiableCredential;
         const subject = credential.credentialSubject;
         
-        const chatId = subject.chatId;
-        const chatName = subject.chatName || 'Chat sem nome';
-        const hostDid = credential.issuer.id;
+        // Verificar se é credencial de convite
+        if (!credential.type.includes('ChatInviteCredential')) {
+          throw new Error('Tipo de credencial inválido. Esperado: ChatInviteCredential');
+        }
+
+        const chatDid = subject.chatDid;
+        const chatCredentialId = subject.chatCredentialId;
         const permissions = subject.permissions || ['read', 'write'];
-        const websocketUrl = subject.websocketUrl || 'ws://localhost:8080';
-        const webhookConfig = subject.webhookConfig;
-        const chatStatus = subject.chatStatus || 'active';
 
         console.log('📋 Dados do convite:', {
-          chatId,
-          chatName,
-          hostDid,
+          chatDid,
+          chatCredentialId,
           permissions,
-          websocketUrl,
-          webhookConfig,
-          chatStatus
+          inviteType: subject.inviteType
         });
 
-        const existingChat = await db.chatRooms.where('chatId').equals(chatId).first();
+        // Buscar a credencial do chat referenciada
+        const chatCredential = await agent.getCredential(chatCredentialId);
+        if (!chatCredential) {
+          throw new Error('Credencial do chat referenciada não encontrada');
+        }
+
+        // Decodificar a credencial do chat para obter informações
+        const chatData = parseJWT(chatCredential.jwt);
+        if (!chatData?.vc?.credentialSubject) {
+          throw new Error('Dados do chat inválidos');
+        }
+
+        const chatInfo = chatData.vc.credentialSubject;
+        const chatName = chatInfo.chatName || 'Chat sem nome';
+        const owner = chatInfo.owner;
+        const websocketUrl = chatInfo.websocketUrl || 'ws://192.168.15.3:8080';
+
+        const existingChat = await db.chatRooms.where('chatId').equals(chatDid).first();
         
         if (existingChat) {
           console.log('⚠️ Você já tem acesso a este chat');
           alert('Você já tem acesso a este chat!');
-          selectChat(chatId);
+          selectChat(chatDid);
           clearInvite();
           return;
         }
 
-        await db.credentials.add({
-          chatId: chatId,
-          issuerDid: hostDid,
-          jwt: jwtToken,
-          receivedAt: new Date().toISOString()
-        });
+        // Salvar credencial de acesso no Veramo
+        await agent.saveChatCredential(
+          jwtToken, // Salvar a credencial de convite
+          chatDid,
+          owner
+        );
 
         await db.chatRooms.add({
-          chatId: chatId,
+          chatId: chatDid,
           name: chatName,
-          ownerDid: hostDid,
-          createdAt: credential.issuanceDate || new Date().toISOString(),
+          ownerDid: owner,
+          createdAt: chatInfo.createdAt || new Date().toISOString(),
           isOwner: false,
           saveMessagesLocally: true,
           webhookEnabled: false,
           websocketUrl: websocketUrl,
-          isActive: chatStatus === 'active'
+          isActive: chatInfo.status === 'active'
         });
-
-        if (webhookConfig) {
-          await db.webhookConfigs.add({
-            chatId: chatId,
-            ownerDid: hostDid,
-            url: webhookConfig.url || '',
-            secret: webhookConfig.secret || '',
-            active: webhookConfig.active || false,
-            retryAttempts: webhookConfig.retryAttempts || 3,
-            headers: webhookConfig.headers || {},
-            createdAt: new Date().toISOString()
-          });
-        }
 
         await loadChats();
         
         await new Promise(resolve => setTimeout(resolve, 150));
         
-        selectChat(chatId);
+        selectChat(chatDid);
         clearInvite();
         
         console.log('✅ Convite aceito! Você entrou no chat.');
@@ -491,6 +704,29 @@ const App = () => {
       console.log('Webhook configurado com sucesso');
     } catch (error) {
       console.error('Erro ao configurar webhook:', error);
+    }
+  };
+
+  // Função para debugar credenciais
+  const debugCredentials = async () => {
+    if (!agent) return;
+    
+    try {
+      const allCredentials = await agent.getAllCredentials();
+      const chatCredentials = await agent.getChatCredentials();
+      
+      console.log('🔍 Todas as credenciais:', allCredentials);
+      console.log('💬 Credenciais de chat:', chatCredentials);
+      
+      const shouldClear = confirm(`Credenciais armazenadas: ${allCredentials.length} total, ${chatCredentials.length} de chat.\n\nDeseja limpar todas as credenciais?`);
+      
+      if (shouldClear) {
+        await agent.clearAllCredentials();
+        console.log('🧹 Credenciais limpas');
+        alert('Credenciais limpas! Recarregue a página.');
+      }
+    } catch (error) {
+      console.error('❌ Erro ao listar credenciais:', error);
     }
   };
 
@@ -621,6 +857,8 @@ const App = () => {
             setShowSidebar(false);
           }}
           onToggleChat={handleToggleChatStatus}
+          onDeleteChat={handleDeleteChat}
+          onDebugCredentials={debugCredentials}
         />
       </div>
 
@@ -706,35 +944,53 @@ const App = () => {
           onClose={() => setShowInviteModal(false)}
           onCreateInvite={async (config) => {
             try {
-              console.log('🎫 Criando convite P2P com VC...');
+              console.log('🎫 Criando convite com nova estrutura...');
               
               const expiresAt = new Date();
               expiresAt.setHours(expiresAt.getHours() + config.expiresIn);
 
-              const vcJwt = await agent.createVerifiableCredential({
+              // Buscar a credencial do chat para referenciar
+              const chatCredentials = await agent.getChatCredentials();
+              const chatCredential = chatCredentials.find((cred: any) => {
+                // Decodificar JWT para verificar se é do chat atual
+                try {
+                  const decoded = parseJWT(cred.jwt);
+                  return decoded?.vc?.credentialSubject?.id === selectedChatId;
+                } catch {
+                  return false;
+                }
+              });
+
+              if (!chatCredential) {
+                throw new Error('Credencial do chat não encontrada');
+              }
+
+              // Criar credencial de convite que referencia a credencial do chat
+              const inviteCredential = await agent.createVerifiableCredential({
                 credential: {
                   '@context': ['https://www.w3.org/2018/credentials/v1'],
-                  type: ['VerifiableCredential', 'ChatAccessCredential'],
+                  type: ['VerifiableCredential', 'ChatInviteCredential'],
                   issuer: { id: currentUserDid },
                   issuanceDate: new Date().toISOString(),
                   expirationDate: expiresAt.toISOString(),
                   credentialSubject: {
-                    chatId: selectedChatId,
-                    chatName: selectedChat.name,
+                    id: `did:invite:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`,
+                    chatDid: selectedChatId,
+                    chatCredentialId: chatCredential.hash, // Referência à credencial do chat
                     permissions: config.permissions,
                     maxUses: config.maxUses,
-                    inviteId: `inv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+                    inviteType: 'access'
                   }
                 },
                 proofFormat: 'jwt'
               });
 
-              console.log('✅ VC criada:', vcJwt);
+              console.log('✅ Credencial de convite criada:', inviteCredential);
 
-              const inviteCode = vcJwt.proof.jwt;
+              const inviteCode = inviteCredential.proof.jwt;
 
               return {
-                credential: vcJwt,
+                credential: inviteCredential,
                 inviteCode: inviteCode,
                 expiresAt: expiresAt.toISOString(),
                 maxUses: config.maxUses,
@@ -770,7 +1026,6 @@ const App = () => {
         />
       )}
 
-      {/* Aviso de Segurança para HTTP */}
       {showSecurityWarning && (
         <div className="fixed top-0 left-0 right-0 bg-yellow-600 text-black p-3 z-50">
           <div className="flex items-center justify-between max-w-4xl mx-auto">

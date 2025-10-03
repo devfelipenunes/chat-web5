@@ -7,9 +7,10 @@ interface ChatListProps {
   onChatSelect: (chatId: string) => void;
   onlineUsers: Set<string>;
   onToggleChat?: (chatId: string) => void;
+  onDeleteChat?: (chatId: string) => void;
 }
 
-export const ChatList = ({ chats, selectedChatId, onChatSelect, onlineUsers, onToggleChat }: ChatListProps) => {
+export const ChatList = ({ chats, selectedChatId, onChatSelect, onlineUsers, onToggleChat, onDeleteChat }: ChatListProps) => {
   if (chats.length === 0) {
     return (
       <div className="text-gray-400 text-sm text-center py-8">
@@ -22,15 +23,14 @@ export const ChatList = ({ chats, selectedChatId, onChatSelect, onlineUsers, onT
 
   return (
     <div className="space-y-2">
-      {chats.map((chat) => {
+      {chats.map((chat, index) => {
         const isOnline = onlineUsers.has(chat.id);
         const isSelected = selectedChatId === chat.id;
         
         return (
           <div
-            key={chat.id}
-            onClick={() => onChatSelect(chat.id)}
-            className={`p-3 rounded-lg cursor-pointer transition-colors ${
+            key={`${chat.id}-${index}`}
+            className={`p-3 rounded-lg transition-colors ${
               isSelected
                 ? 'bg-indigo-600 text-white'
                 : 'bg-gray-700 hover:bg-gray-600'
@@ -58,19 +58,29 @@ export const ChatList = ({ chats, selectedChatId, onChatSelect, onlineUsers, onT
                 </div>
               </div>
               
-              {chat.isOwner && onToggleChat && (
-                <Button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleChat(chat.id);
-                  }}
-                  variant={chat.isActive !== false ? "success" : "danger"}
-                  size="sm"
-                  className="ml-2 px-2 py-1 text-xs"
-                >
-                  {chat.isActive !== false ? '🟢' : '🔴'}
-                </Button>
-              )}
+              <div className="flex items-center gap-1">
+                {chat.isOwner && onToggleChat && (
+                  <Button
+                    onClick={() => onToggleChat(chat.id)}
+                    variant={chat.isActive !== false ? "success" : "danger"}
+                    size="sm"
+                    className="px-2 py-1 text-xs"
+                  >
+                    {chat.isActive !== false ? '🟢' : '🔴'}
+                  </Button>
+                )}
+                
+                {onDeleteChat && (
+                  <Button
+                    onClick={() => onDeleteChat(chat.id)}
+                    variant="danger"
+                    size="sm"
+                    className="px-2 py-1 text-xs"
+                  >
+                    🗑️
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         );
@@ -243,6 +253,8 @@ interface SidebarProps {
   isSavingWebhook: boolean;
   onScanQR?: () => void;
   onToggleChat?: (chatId: string) => void;
+  onDeleteChat?: (chatId: string) => void;
+  onDebugCredentials?: () => void;
 }
 
 
@@ -262,7 +274,9 @@ export const Sidebar = ({
   onSaveWebhook,
   isSavingWebhook,
   onScanQR,
-  onToggleChat
+  onToggleChat,
+  onDeleteChat,
+  onDebugCredentials
 }: SidebarProps) => {
   return (
     <div className="w-full h-full bg-gray-900 p-4 border-r border-gray-700 flex flex-col overflow-hidden">
@@ -270,6 +284,16 @@ export const Sidebar = ({
         {/* Header */}
         <div className="pb-4 border-b border-gray-700">
           <h1 className="text-xl font-bold text-white">Web5 Chat</h1>
+          {onDebugCredentials && (
+            <Button
+              onClick={onDebugCredentials}
+              variant="secondary"
+              size="sm"
+              className="mt-2 text-xs"
+            >
+              🔍 Debug Credenciais
+            </Button>
+          )}
         </div>
 
         {/* New Chat Button */}
@@ -289,6 +313,7 @@ export const Sidebar = ({
             onChatSelect={onChatSelect}
             onlineUsers={onlineUsers}
             onToggleChat={onToggleChat}
+            onDeleteChat={onDeleteChat}
           />
         </div>
 
